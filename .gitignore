@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+Thumbs.db
+# Datos de Norgate: licencia, no se redistribuyen. Regenera con descargar_datos.py
+data/QQQ_D1.csv

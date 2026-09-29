@@ -1,0 +1,36 @@
+{
+  "status": "CERRADA",
+  "estrategia": "TIS RSI(2) Mean Reversion",
+  "activo": "QQQ",
+  "broker": "Darwinex",
+  "plataforma": "MetaTrader 5",
+  "ventana_reconciliacion": {
+    "desde": "2024-02-21",
+    "hasta": "2026-09-14",
+    "criterio": "Ventana ejecutable común entre el backtest y el Strategy Tester"
+  },
+  "pre_ventana": {
+    "historico_disponible": true,
+    "senales_detectadas": true,
+    "ejecucion_valida": false,
+    "motivo": "Antes del 21/02/2024 el Strategy Tester detecta señales e intenta ejecutar órdenes, pero Darwinex devuelve 'Market closed'."
+  },
+  "matching": {
+    "operaciones_mt5": 40,
+    "operaciones_comparadas": 40,
+    "entradas_misma_fecha": 40,
+    "salidas_misma_fecha": 40,
+    "matching_entradas_pct": 100.0,
+    "matching_salidas_pct": 100.0
+  },
+  "strategy_tester": {
+    "deposito_inicial_usd": 100000,
+    "beneficio_neto_usd": 9534.63,
+    "profit_factor": 2.12,
+    "win_rate_pct": 80.0,
+    "max_drawdown_balance_pct": 2.83,
+    "max_drawdown_equity_pct": 4.40,
+    "calidad_historial": "100% ticks reales"
+  },
+  "conclusion": "La lógica de señal y salida queda reconciliada con MetaTrader 5 en la ventana ejecutable 21/02/2024-14/09/2026: 40/40 entradas y 40/40 salidas coinciden en fecha."
+}

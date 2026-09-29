@@ -151,8 +151,41 @@ def episodios_dd(eq, top=5):
         eps.append(dict(inicio=str(ini.date()), fondo=str(fondo.date()), fin=None, prof=float(vmin),
                         dias=(dd.index[-1] - ini).days))
     eps.sort(key=lambda e: e["prof"])
+    bordes = [(0, 0.02, "0 – 2 %"), (0.02, 0.05, "2 – 5 %"), (0.05, 0.10, "5 – 10 %"), (0.10, 0.15, "10 – 15 %"), (0.15, 1.0, "> 15 %")]
+    bins = []
+    for lo, hi, nom in bordes:
+        sel = [e for e in eps if lo <= -e["prof"] < hi]
+        bins.append(dict(bin=nom, n=len(sel), dias_medio=float(np.mean([e["dias"] for e in sel])) if sel else 0.0,
+                         dias_max=int(max([e["dias"] for e in sel])) if sel else 0, pct=float(len(sel) / len(eps)) if eps else 0.0))
     return dict(n=len(eps), recuperados=sum(e["fin"] is not None for e in eps),
-                dias_medio=float(np.mean([e["dias"] for e in eps])) if eps else None, peores=eps[:top])
+                dias_medio=float(np.mean([e["dias"] for e in eps])) if eps else None, peores=eps[:top], bins=bins)
+
+
+def mensual(eq):
+    """Retornos mensuales y anuales de la curva de capital, con meses positivos/negativos por año."""
+    m = eq.resample("ME").last().pct_change().dropna()
+    m.iloc[0] = eq.resample("ME").last().iloc[1] / eq.iloc[0] - 1 if len(m) else 0
+    anos = sorted(set(m.index.year)); filas = []; matriz = []
+    for y in anos:
+        s = m[m.index.year == y]; fila = [None] * 12
+        for d, v in s.items(): fila[d.month - 1] = float(v)
+        anual = float((1 + s).prod() - 1)
+        op = s[s != 0]
+        filas.append(dict(ano=y, anual=anual, pos=int((s > 0).sum()), neg=int((s < 0).sum()), planos=int((s == 0).sum()),
+                          peor_mes=float(op.min()) if len(op) else 0.0, mejor_mes=float(op.max()) if len(op) else 0.0))
+        matriz.append(fila)
+    ult = [f for f in filas if f["ano"] >= anos[-1] - 9]
+    return dict(anos=anos, filas=filas, matriz=matriz, meses_pos=int((m > 0).sum()), meses_neg=int((m < 0).sum()), meses_planos=int((m == 0).sum()),
+                anos_negativos=[f["ano"] for f in filas if f["anual"] < 0], ultimos10_negativos=[f["ano"] for f in ult if f["anual"] < 0],
+                ultimos10_desde=ult[0]["ano"] if ult else None, peor_mes=float(m.min()), peor_mes_fecha=str(m.idxmin().date()), mejor_mes=float(m.max()))
+
+
+def pf_movil(trades, w=40):
+    r = np.array([t["ret"] for t in trades]); out = []
+    for i in range(w, len(r) + 1):
+        s = r[i - w:i]; g = s[s > 0].sum(); l = np.abs(s[s <= 0]).sum() or 1e-12
+        out.append(dict(fecha=str(trades[i - 1]["salida"].date()), pf=float(min(g / l, 8)), exp=float(s.mean())))
+    return out
 
 
 # ----------------------------------------------------------------- fases
@@ -236,21 +269,21 @@ def robustez_4d(raw, n_is):
     SAL = [("2verdes", "Dos velas verdes"), ("ma5", "Cierre > MA(5)"), ("rsi70", "RSI(2) > 70")]
     SLIP = [(0.0005, "5 bps"), (0.0010, "10 bps")]
     preps = {sl: preparar(raw, sl) for sl in SM}
-    cubos, todos = {}, []
+    cubos, cubos_mdd, cubos_n, todos = {}, {}, {}, []
     for sk, sn in SAL:
         for sp, spn in SLIP:
-            pf = np.full((len(RS), len(SM)), np.nan)
+            pf = np.full((len(RS), len(SM)), np.nan); md = np.full_like(pf, np.nan); nn = np.zeros_like(pf)
             for a, rt in enumerate(RS):
                 for b, sl in enumerate(SM):
                     d2 = preps[sl]; d2 = d2[d2.index <= n_is]
                     m = metricas(backtest(d2, rsi_thr=rt, slip=sp, salida=sk))
                     if m:
-                        pf[a, b] = m["pf"]
+                        pf[a, b], md[a, b], nn[a, b] = m["pf"], m["mdd"], m["n"]
                         todos.append(dict(rsi=rt, sma=sl, salida=sn, coste=spn, pf=m["pf"], n=m["n"], mdd=m["mdd"]))
-            cubos[f"{sn} · {spn}"] = np.round(pf, 3).tolist()
+            cubos[f"{sn} · {spn}"] = np.round(pf, 3).tolist(); cubos_mdd[f"{sn} · {spn}"] = np.round(md, 4).tolist(); cubos_n[f"{sn} · {spn}"] = nn.astype(int).tolist()
     pfs = np.array([x["pf"] for x in todos])
     viva = [x for x in todos if x["rsi"] == RSI_THR and x["sma"] == SMA_LEN and x["salida"] == "Dos velas verdes" and x["coste"] == "5 bps"][0]["pf"]
-    return dict(rsi=RS, sma=SM, salidas=[s for _, s in SAL], costes=[s for _, s in SLIP], cubos=cubos,
+    return dict(rsi=RS, sma=SM, salidas=[s for _, s in SAL], costes=[s for _, s in SLIP], cubos=cubos, cubos_mdd=cubos_mdd, cubos_n=cubos_n,
                 n_combos=int(len(todos)), pct_pf13=float((pfs >= 1.3).mean()), pct_pf1=float((pfs >= 1.0).mean()),
                 pf_min=float(pfs.min()), pf_mediana=float(np.median(pfs)), pf_max=float(pfs.max()),
                 pf_vigente=float(viva), percentil_vigente=float((pfs < viva).mean()),
@@ -259,22 +292,30 @@ def robustez_4d(raw, n_is):
                 _todos=todos)
 
 
-def fase4_montecarlo(trades, n_sim=5000, bloque=5, sizing="capital"):
+def fase4_montecarlo(trades, n_sim=10000, bloque=5, sizing="capital", guardar_caminos=False):
     r = np.array([t["ret"] * expo_de(t, sizing) for t in trades]); n = len(r)
-    rets, mdds, ruina = [], [], 0
-    for _ in range(n_sim):
+    rets, mdds, ruina = [], [], 0; caminos = np.zeros((n_sim, n)) if guardar_caminos else None
+    peor_eq, peor_mdd = None, 0
+    for k in range(n_sim):
         starts = rng.integers(0, n, size=int(np.ceil(n / bloque)))
         idx = np.concatenate([np.arange(s, s + bloque) % n for s in starts])[:n]
-        eq = np.cumprod(1 + r[idx]); pk = np.maximum.accumulate(eq)
-        rets.append(eq[-1] - 1); mdds.append(((eq - pk) / pk).min()); ruina += eq.min() < 0.5
+        eq = np.cumprod(1 + r[idx]); pk = np.maximum.accumulate(eq); m = ((eq - pk) / pk).min()
+        rets.append(eq[-1] - 1); mdds.append(m); ruina += eq.min() < 0.5
+        if guardar_caminos:
+            caminos[k] = eq
+            if m < peor_mdd: peor_mdd, peor_eq = m, eq
     rets, mdds = np.array(rets), np.array(mdds)
     out = dict(n_sim=n_sim, bloque=bloque, p5_ret=float(np.percentile(rets, 5)), p50_ret=float(np.median(rets)),
                p95_ret=float(np.percentile(rets, 95)), mdd_p5=float(np.percentile(mdds, 5)),
                mdd_p50=float(np.median(mdds)), mdd_p95=float(np.percentile(mdds, 95)),
+               mdd_peor=float(mdds.min()), mdd_mejor=float(mdds.max()), ret_peor=float(rets.min()), ret_mejor=float(rets.max()),
                prob_mdd_25=float((mdds < -0.25).mean()), prob_ruina=float(ruina / n_sim),
                prob_ret_pos=float((rets > 0).mean()))
     out["pasa"] = bool(out["p5_ret"] > 0 and out["mdd_p5"] > -0.25 and out["prob_ruina"] < 0.05)
     out["_rets"], out["_mdds"] = rets, mdds
+    if guardar_caminos:
+        out["_caminos"] = caminos[:400]; out["_bandas"] = np.percentile(caminos, [5, 25, 50, 75, 95], axis=0)
+        out["_peor"] = peor_eq; out["_real"] = np.cumprod(1 + r)
     return out
 
 
@@ -300,18 +341,20 @@ def monkey_test(df, trades, n_sim=2000):
     o, c, sma = df["Open"].values, df["Close"].values, df["sma"].values
     elig = np.where(c[:-1] > sma[:-1])[0] + 1              # el día siguiente a un cierre sobre la SMA
     dur = np.array([t["barras"] for t in trades]); n = len(trades)
-    real = metricas(trades); pfs, rets, mdds = [], [], []
-    for _ in range(n_sim):
-        ent = rng.choice(elig, size=n, replace=False); d = rng.choice(dur, size=n)
+    real = metricas(trades); pfs, rets, mdds, curvas = [], [], [], []
+    for k in range(n_sim):
+        ent = np.sort(rng.choice(elig, size=n, replace=False)); d = rng.choice(dur, size=n)
         sal = np.minimum(ent + d, len(df) - 1)
         r = (o[sal] * (1 - SLIP)) / (o[ent] * (1 + SLIP)) - 1
         g, l = r[r > 0].sum(), np.abs(r[r <= 0]).sum() or 1e-12
         eq = np.cumprod(1 + r); pk = np.maximum.accumulate(eq)
         pfs.append(g / l); rets.append(eq[-1] - 1); mdds.append(((eq - pk) / pk).min())
+        if k < 250: curvas.append(eq)
     pfs, rets, mdds = np.array(pfs), np.array(rets), np.array(mdds)
     return dict(n_sim=n_sim, pf_real=real["pf"], pct_pf=float((pfs < real["pf"]).mean()),
                 pct_ret=float((rets < real["ret_total"]).mean()), pct_mdd=float((mdds < real["mdd"]).mean()),
-                pf_mono_mediana=float(np.median(pfs)), _pfs=pfs)
+                pf_mono_mediana=float(np.median(pfs)), ret_mono_mediana=float(np.median(rets)), mdd_mono_mediana=float(np.median(mdds)),
+                _pfs=pfs, _curvas=np.array(curvas), _real=np.cumprod(1 + np.array([t["ret"] for t in trades])))
 
 
 def edge_decay(trades, is_fin):
@@ -418,38 +461,70 @@ def graficos(df, tr_all, eq_cap, eq_atr, sp_date, res, raw):
     fig.colorbar(im, ax=ax, label="Profit Factor (IS)", shrink=0.8)
     guardar(fig, "04_grid.png")
 
-    # 5. Monte Carlo
-    mc = res["fase4"]
-    fig, (a1, a2) = plt.subplots(1, 2, figsize=(11, 4.2))
-    a1.hist(mc["_rets"] * 100, bins=50, color=VERDE2, alpha=0.8, ec="white")
-    a1.axvline(mc["p5_ret"] * 100, color=TINTA, ls="--"); a1.text(mc["p5_ret"] * 100, a1.get_ylim()[1] * 0.9, f" p5 = {mc['p5_ret']*100:.0f} %", color=TINTA)
-    a1.set_title("Retorno total en 5.000 reordenaciones"); a1.set_xlabel("Retorno total (%)")
-    a2.hist(mc["_mdds"] * 100, bins=50, color="#f0a860", alpha=0.85, ec="white")
-    a2.axvline(-25, color=ROJO, ls="--"); a2.text(-25, a2.get_ylim()[1] * 0.9, " límite −25 %", color=ROJO, ha="right")
-    a2.axvline(mc["mdd_p5"] * 100, color=TINTA, ls="--"); a2.text(mc["mdd_p5"] * 100, a2.get_ylim()[1] * 0.75, f" p5 = {mc['mdd_p5']*100:.1f} %", color=TINTA)
-    a2.set_title("Drawdown máximo en las mismas reordenaciones"); a2.set_xlabel("Drawdown máximo (%)")
-    guardar(fig, "05_montecarlo.png")
+    # 5. Monte Carlo: abanico de caminos + distribuciones
+    mc = res["fase4"]; n_tr = mc["_caminos"].shape[1]; xi = np.arange(1, n_tr + 1)
+    fig = plt.figure(figsize=(13, 9)); gs = fig.add_gridspec(2, 2, height_ratios=[1.6, 1])
+    a0 = fig.add_subplot(gs[0, :]); a1 = fig.add_subplot(gs[1, 0]); a2 = fig.add_subplot(gs[1, 1])
+    for cam in mc["_caminos"]: a0.plot(xi, cam, color=GRIS, lw=0.4, alpha=0.25)
+    b = mc["_bandas"]; a0.fill_between(xi, b[0], b[4], color=VERDE, alpha=0.12, lw=0); a0.fill_between(xi, b[1], b[3], color=VERDE, alpha=0.18, lw=0)
+    a0.plot(xi, b[2], color=VERDE, lw=1.6, ls="--"); a0.plot(xi, mc["_real"], color=TINTA, lw=2.2); a0.plot(xi, mc["_peor"], color=ROJO, lw=1.6)
+    a0.set_yscale("log"); ticks = [0.5, 1, 2, 3, 5, 8, 12]; a0.set_yticks(ticks); a0.set_yticklabels([f"{t:g}×" for t in ticks]); a0.minorticks_off()
+    arriba = mc["_real"][-1] >= b[2][-1]
+    a0.text(n_tr, mc["_real"][-1], f"  real · {mc['_real'][-1]:.1f}×", color=TINTA, fontweight="bold", va="bottom" if arriba else "top")
+    a0.text(n_tr, b[2][-1], f"  mediana · {b[2][-1]:.1f}×", color=VERDE, fontweight="bold", va="top" if arriba else "bottom")
+    a0.text(n_tr, mc["_peor"][-1], f"  peor drawdown · {mc['mdd_peor']*100:.0f} %", color=ROJO, fontweight="bold", va="center")
+    a0.set_xlim(1, n_tr * 1.14); a0.set_xlabel("Número de operación"); a0.set_ylabel("Capital (1 = inicial, escala log)")
+    a0.set_title(f"{mc['n_sim']:,} reordenaciones de las {n_tr} operaciones reales · 400 dibujadas · bandas: 5–95 % y 25–75 % de todas".replace(",", "."))
+    a0.legend([plt.Line2D([], [], color=GRIS, lw=1), plt.Line2D([], [], color=VERDE, lw=1.6, ls="--"), plt.Line2D([], [], color=TINTA, lw=2.2), plt.Line2D([], [], color=ROJO, lw=1.6)],
+              ["Un camino posible", "Mediana de todos", "El camino real", "El camino con el peor drawdown"], loc="upper left", frameon=False, fontsize=9.5)
+    a1.hist(mc["_rets"] * 100, bins=60, color=VERDE2, alpha=0.8, ec="white")
+    a1.axvline(mc["p5_ret"] * 100, color=TINTA, ls="--"); a1.text(mc["p5_ret"] * 100, a1.get_ylim()[1] * 0.9, f" 5 % peor: {mc['p5_ret']*100:+.0f} %", color=TINTA, fontsize=9)
+    a1.set_title("Retorno total de cada camino", fontsize=11); a1.set_xlabel("Retorno total (%)")
+    a2.hist(mc["_mdds"] * 100, bins=60, color="#f0a860", alpha=0.85, ec="white")
+    a2.axvline(-25, color=ROJO, ls="--"); a2.text(-25, a2.get_ylim()[1] * 0.9, " límite −25 % ", color=ROJO, ha="right", fontsize=9)
+    a2.axvline(mc["mdd_p5"] * 100, color=TINTA, ls="--"); a2.text(mc["mdd_p5"] * 100, a2.get_ylim()[1] * 0.72, f" 5 % peor: {mc['mdd_p5']*100:.1f} %", color=TINTA, fontsize=9)
+    a2.axvline(mc["mdd_peor"] * 100, color=ROJO, lw=2); a2.text(mc["mdd_peor"] * 100, a2.get_ylim()[1] * 0.5, f" el peor de todos: {mc['mdd_peor']*100:.1f} %", color=ROJO, fontsize=9)
+    a2.set_title("Drawdown máximo de cada camino", fontsize=11); a2.set_xlabel("Drawdown máximo (%)")
+    fig.tight_layout(); guardar(fig, "05_montecarlo.png")
 
-    # 6. monkey
-    mk = res["monkey"]
-    fig, ax = plt.subplots(figsize=(11, 4.5))
-    ax.hist(mk["_pfs"], bins=50, color="#c2d0c8", ec="white")
-    ax.axvline(mk["pf_real"], color=VERDE, lw=3)
-    ax.text(mk["pf_real"], ax.get_ylim()[1] * 0.85, f"  Estrategia real · PF {mk['pf_real']:.2f}\n  supera al {mk['pct_pf']*100:.1f} % de los monos", color=VERDE, fontweight="bold")
-    ax.set_title(f"Monkey test — {mk['n_sim']} entradas al azar dentro de la misma tendencia"); ax.set_xlabel("Profit Factor de cada mono")
-    guardar(fig, "06_monkey.png")
+    # 6. monkey: curvas de los monos + distribución con línea
+    from scipy.stats import gaussian_kde
+    mk = res["monkey"]; nm = mk["_curvas"].shape[1]; xm = np.arange(1, nm + 1)
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(13, 5.2), gridspec_kw=dict(width_ratios=[1.35, 1]))
+    for cv in mk["_curvas"]: a1.plot(xm, cv, color=GRIS, lw=0.5, alpha=0.35)
+    a1.plot(xm, np.median(mk["_curvas"], axis=0), color="#7a4fb8", lw=1.8, ls="--"); a1.plot(xm, mk["_real"], color=VERDE, lw=2.4)
+    a1.set_yscale("log"); ticks = [0.5, 1, 2, 3, 5, 8]; a1.set_yticks(ticks); a1.set_yticklabels([f"{t:g}×" for t in ticks]); a1.minorticks_off()
+    a1.text(nm, mk["_real"][-1], f"  estrategia · {mk['_real'][-1]:.1f}×", color=VERDE, fontweight="bold", va="center")
+    a1.text(nm, np.median(mk["_curvas"], axis=0)[-1], f"  mono mediano · {np.median(mk['_curvas'], axis=0)[-1]:.1f}×", color="#7a4fb8", fontweight="bold", va="center")
+    a1.set_xlim(1, nm * 1.2); a1.set_xlabel("Número de operación"); a1.set_ylabel("Capital (escala log)")
+    a1.set_title("250 monos entrando al azar (gris) frente a la estrategia (verde)", fontsize=11)
+    cnt, edges, _ = a2.hist(mk["_pfs"], bins=45, color="#c2d0c8", ec="white")
+    xs = np.linspace(mk["_pfs"].min(), max(mk["_pfs"].max(), mk["pf_real"] * 1.05), 300); kde = gaussian_kde(mk["_pfs"])(xs) * len(mk["_pfs"]) * (edges[1] - edges[0])
+    a2.plot(xs, kde, color="#7a4fb8", lw=2)
+    a2.axvline(mk["pf_mono_mediana"], color="#7a4fb8", ls="--"); a2.axvline(mk["pf_real"], color=VERDE, lw=3)
+    a2.text(mk["pf_real"], a2.get_ylim()[1] * 0.9, f" estrategia · PF {mk['pf_real']:.2f}\n supera al {mk['pct_pf']*100:.1f} %", color=VERDE, fontweight="bold", fontsize=9.5, ha="right")
+    a2.text(mk["pf_mono_mediana"], a2.get_ylim()[1] * 0.55, f" mono mediano · {mk['pf_mono_mediana']:.2f}", color="#7a4fb8", fontsize=9.5)
+    a2.set_title(f"Profit Factor de los {mk['n_sim']:,} monos".replace(",", "."), fontsize=11); a2.set_xlabel("Profit Factor"); a2.set_ylabel("Monos")
+    fig.tight_layout(); guardar(fig, "06_monkey.png")
 
-    # 7. PF por año
-    ed = res["edge_decay"]["anual"]
-    fig, ax = plt.subplots(figsize=(11, 4.2))
-    cols = [VERDE if f["pf"] >= 1 else ROJO for f in ed]
-    ax.bar([f["ano"] for f in ed], [min(f["pf"], 6) for f in ed], color=cols, width=0.7)
-    ax.axhline(1, color=TINTA, lw=1); ax.axvspan(sp_date.year - 0.5, ed[-1]["ano"] + 0.5, color="#eef6f1", zorder=0)
-    for f in ed:
-        ax.text(f["ano"], min(f["pf"], 6) + 0.08, f"{f['n']} op." + (" · PF>6" if f["pf"] > 6 else ""), ha="center", fontsize=7.5, color="#6b7a72", rotation=90 if f["pf"] > 6 else 0, va="bottom")
-    ax.set_ylim(0, 7.6)
-    ax.set_title("¿Se desgasta el edge? Profit Factor por año (sombreado = fuera de muestra)"); ax.set_ylabel("Profit Factor (tope 6)")
-    guardar(fig, "07_pf_anual.png")
+    # 7. desgaste del edge: PF móvil de las últimas 40 operaciones + operaciones por año
+    ed = res["edge_decay"]["anual"]; mv = res["edge_decay"]["movil"]
+    fx = pd.to_datetime([m["fecha"] for m in mv]); fy = [m["pf"] for m in mv]
+    fig, (a1, a2) = plt.subplots(2, 1, figsize=(12, 7), height_ratios=[2.2, 1], sharex=True)
+    a1.axvspan(sp_date, fx[-1], color="#eef6f1", zorder=0)
+    a1.fill_between(fx, 1, fy, where=np.array(fy) >= 1, color=VERDE, alpha=0.15, lw=0); a1.fill_between(fx, 1, fy, where=np.array(fy) < 1, color=ROJO, alpha=0.25, lw=0)
+    a1.plot(fx, fy, color=VERDE, lw=2)
+    a1.axhline(1, color=ROJO, lw=1.2); a1.axhline(1.3, color=TINTA, lw=1, ls="--")
+    bb = dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.85)
+    a1.text(fx[0], 1.36, " criterio: 1,3", color=TINTA, fontsize=9, bbox=bb); a1.text(fx[0], 0.82, " por debajo de 1 se pierde dinero", color=ROJO, fontsize=9, bbox=bb)
+    a1.text(sp_date, a1.get_ylim()[1] * 0.97, "  fuera de muestra →", va="top", color="#3a4b44", fontsize=10)
+    a1.set_ylabel("Profit Factor de las últimas 40 operaciones"); a1.set_ylim(0, min(8, max(fy) * 1.1))
+    a1.set_title("¿Se desgasta el edge? Profit Factor móvil: si la línea bajara hacia 1 y se quedara, el edge estaría muriendo")
+    a2.bar([pd.Timestamp(f"{f['ano']}-07-01") for f in ed], [f["n"] for f in ed], width=250, color=[VERDE if f["pf"] >= 1 else ROJO for f in ed])
+    for f in ed: a2.text(pd.Timestamp(f"{f['ano']}-07-01"), f["n"] + 0.4, str(f["n"]), ha="center", fontsize=8, color="#3a4b44")
+    a2.set_ylabel("Operaciones por año"); a2.set_title("Frecuencia: verde = año con PF > 1, rojo = año perdedor. Sin barra = año sin operaciones (precio bajo la SMA 200)", fontsize=10)
+    a2.xaxis.set_major_locator(mdates.YearLocator(2)); a2.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+    fig.tight_layout(); guardar(fig, "07_pf_anual.png")
 
     # 8. underwater
     fig, ax = plt.subplots(figsize=(11, 3.8))
@@ -542,39 +617,87 @@ def graficos(df, tr_all, eq_cap, eq_atr, sp_date, res, raw):
     # 13. AED: retornos a plazo tras la señal
     ae = res["aed"]; H = ae["horizontes"]; nombres = list(ae["forward"].keys())
     cols_g = [GRIS, AZUL, VERDE, ROJO]
-    fig, ax = plt.subplots(figsize=(11, 4.8)); w = 0.2
+    fig, ax = plt.subplots(figsize=(13, 6.2)); w = 0.2
     for k, (nom, col) in enumerate(zip(nombres, cols_g)):
         vals = [ae["forward"][nom][h]["media"] * 100 for h in H]
         ax.bar(np.arange(len(H)) + (k - 1.5) * w, vals, width=w, color=col, label=nom)
         for x, v in zip(np.arange(len(H)) + (k - 1.5) * w, vals):
-            ax.text(x, v + (0.05 if v >= 0 else -0.12), f"{v:.1f}", ha="center", fontsize=7.5, color="#3a4b44")
-    ax.axhline(0, color=TINTA, lw=1); ax.set_xticks(range(len(H))); ax.set_xticklabels([f"{h} día{'s' if h > 1 else ''} después" for h in H])
-    ax.set_ylabel("Retorno medio (%)"); ax.legend(frameon=False, fontsize=9, loc="upper left")
-    ax.set_title("¿Qué pasa después de una sobreventa extrema? Retorno medio a 1, 2, 3, 5 y 10 días")
-    guardar(fig, "13_aed_forward.png")
+            ax.text(x, v + (0.02 if v >= 0 else -0.06), f"{v:+.2f}", ha="center", fontsize=8.5, color="#3a4b44")
+    ax.axhline(0, color=TINTA, lw=1); ax.set_xticks(range(len(H))); ax.set_xticklabels([f"{h} día{'s' if h > 1 else ''} después" for h in H], fontsize=11)
+    ax.set_ylabel("Retorno medio (%)", fontsize=11); ax.legend(frameon=False, fontsize=10.5, loc="upper left")
+    ax.set_title("Qué hace el Nasdaq después de una sobreventa extrema\nBarra verde > gris: el momento de entrada aporta · roja alta pero menos fiable: la tendencia compra consistencia", fontsize=12, loc="left")
+    fig.tight_layout(); guardar(fig, "13_aed_forward.png")
 
     # 14. AED: autocorrelación y rachas
-    fig, (a1, a2) = plt.subplots(1, 2, figsize=(11, 4.2))
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(13, 5.4))
     a1.bar(range(1, 11), [v * 100 for v in ae["autocorr"]], color=[ROJO if v < 0 else VERDE for v in ae["autocorr"]], width=0.7)
-    a1.axhline(0, color=TINTA, lw=1); a1.set_xlabel("Retraso (días)"); a1.set_ylabel("Autocorrelación (%)")
-    a1.set_title("Autocorrelación de los retornos diarios")
-    ks = list(ae["rachas"].keys()); a2.bar(ks, [ae["rachas"][k]["media"] * 100 for k in ks], color=VERDE, width=0.6)
-    for k in ks: a2.text(k, ae["rachas"][k]["media"] * 100 + 0.03, f"{ae['rachas'][k]['pct_pos']*100:.0f} % pos.\nn={ae['rachas'][k]['n']}", ha="center", fontsize=8, color="#3a4b44")
-    a2.axhline(0, color=TINTA, lw=1); a2.set_xlabel("Días seguidos de caída (sobre la SMA 200)"); a2.set_ylabel("Retorno medio 3 días después (%)")
-    a2.set_title("Cuanto más cae seguido, más rebota"); a2.set_xticks(ks)
-    guardar(fig, "14_aed_rachas.png")
+    a1.axhline(0, color=TINTA, lw=1); a1.set_xlabel("Retraso (días)"); a1.set_ylabel("Autocorrelación (%)"); a1.set_xticks(range(1, 11))
+    a1.set_title("¿Tiende o revierte? Autocorrelación de los retornos diarios\nBarra roja a 1 día = lo que cae hoy tiende a subir mañana (reversión)", fontsize=11, loc="left")
+    ks = list(ae["rachas"].keys()); vals = [ae["rachas"][k]["media"] * 100 for k in ks]
+    a2.bar(ks, vals, color=VERDE, width=0.6)
+    for k, vv in zip(ks, vals): a2.text(k, vv / 2, f"{ae['rachas'][k]['pct_pos']*100:.0f} % suben\nn = {ae['rachas'][k]['n']}", ha="center", va="center", fontsize=8.5, color="white", fontweight="bold")
+    a2.axhline(0, color=TINTA, lw=1); a2.set_xlabel("Días seguidos de caída (con el precio sobre la SMA 200)"); a2.set_ylabel("Retorno medio 3 días después (%)")
+    a2.set_title("¿Cuánto rebota tras varias caídas seguidas?\nRetorno medio en los 3 días siguientes: cuanto más cae seguido, más rebota", fontsize=11, loc="left"); a2.set_xticks(ks); a2.set_ylim(0, max(vals) * 1.25)
+    fig.tight_layout(); guardar(fig, "14_aed_rachas.png")
 
     # 15. AED: régimen de tendencia y volatilidad
-    fig, (a1, a2) = plt.subplots(2, 1, figsize=(11, 6.5), height_ratios=[2.2, 1], sharex=True)
-    a1.plot(df.index, df["Close"], color=TINTA, lw=0.9); a1.plot(df.index, df["sma"], color=AZUL, lw=1.2)
-    a1.fill_between(df.index, df["Close"].min(), df["Close"].max(), where=~ae["_sobre"].values, color=ROJO, alpha=0.08, lw=0)
-    a1.set_yscale("log"); a1.set_ylabel("QQQ (escala log)")
-    a1.set_title(f"Régimen de tendencia — el {ae['pct_sobre_sma']*100:.0f} % del tiempo sobre la SMA 200 (sombreado rojo: por debajo, la estrategia no opera)")
-    a1.legend(["Cierre QQQ", "SMA 200"], frameon=False, loc="upper left")
+    fig, (a1, a2) = plt.subplots(2, 1, figsize=(13, 8.5), height_ratios=[2.2, 1], sharex=True)
+    a1.plot(df.index, df["Close"], color=TINTA, lw=0.9); a1.plot(df.index, df["sma"], color=AZUL, lw=1.4)
+    a1.set_yscale("log"); ylo, yhi = df["Close"].min() * 0.9, df["Close"].max() * 1.1; a1.set_ylim(ylo, yhi)
+    a1.fill_between(df.index, ylo, yhi, where=~ae["_sobre"].values, color=ROJO, alpha=0.22, lw=0)
+    yt = [v for v in [25, 50, 100, 200, 400, 800, 1600] if ylo <= v <= yhi]; a1.set_yticks(yt); a1.set_yticklabels([str(v) for v in yt]); a1.minorticks_off()
+    a1.set_ylabel("QQQ (USD, escala log)")
+    a1.set_title(f"Régimen de tendencia: el {ae['pct_sobre_sma']*100:.0f} % del tiempo el precio está sobre la SMA 200\nEn rojo, el {100-ae['pct_sobre_sma']*100:.0f} % restante: por debajo de la media la estrategia no opera, y ahí están 2000–2002, 2008 y 2022", fontsize=11.5, loc="left")
+    a1.legend([plt.Line2D([], [], color=TINTA), plt.Line2D([], [], color=AZUL, lw=1.4), plt.Rectangle((0, 0), 1, 1, color=ROJO, alpha=0.22)], ["Cierre QQQ", "SMA 200", "Precio bajo la SMA 200: sin operar"], frameon=False, loc="upper left")
     a2.plot(df.index, ae["_atr_pct"].values * 100, color="#c97d1e", lw=0.9); a2.set_ylabel("ATR(14) / precio (%)")
-    a2.set_title("Volatilidad diaria: por eso el tamaño de posición se calcula con el ATR", fontsize=11)
+    a2.axhline(ae["atr_pct"]["media"] * 100, color=TINTA, lw=1, ls="--"); a2.text(df.index[0], ae["atr_pct"]["media"] * 100 * 1.1, f" media {ae['atr_pct']['media']*100:.1f} %", fontsize=9, color=TINTA)
+    a2.set_title("Volatilidad diaria (ATR como % del precio): se multiplica por 4 en las crisis. Por eso el tamaño de posición se calcula con el ATR y no con un porcentaje fijo", fontsize=11, loc="left")
     a2.xaxis.set_major_locator(mdates.YearLocator(2))
-    guardar(fig, "15_aed_regimen.png")
+    fig.tight_layout(); guardar(fig, "15_aed_regimen.png")
+
+    # 18. AED: colas gordas
+    from scipy.stats import norm as _norm
+    r = df["Close"].pct_change().dropna() * 100; mu, sd = r.mean(), r.std()
+    fig, ax = plt.subplots(figsize=(13, 5.2))
+    cnt, edges, _ = ax.hist(r, bins=120, color="#c2d0c8", ec="white", label="Retornos diarios reales de QQQ")
+    xs = np.linspace(r.min(), r.max(), 500); ax.plot(xs, _norm.pdf(xs, mu, sd) * len(r) * (edges[1] - edges[0]), color=AZUL, lw=2, label="Lo que sería una campana normal con la misma media y desviación")
+    ax.set_yscale("log"); ax.set_ylim(0.5, cnt.max() * 2)
+    for v, lab, col in [(r.min(), f"peor día {r.min():+.1f} %", ROJO), (r.max(), f"mejor día {r.max():+.1f} %", VERDE)]:
+        ax.axvline(v, color=col, lw=1.5, ls="--"); ax.text(v, 3, f" {lab} ", color=col, fontsize=9.5, fontweight="bold", ha="left" if v < 0 else "right", rotation=90, va="bottom")
+    p_norm = 2 * _norm.cdf(-abs(r.min()), 0, sd); anos_n = 1 / (p_norm * 252)
+    anos_txt = f"{anos_n/1e6:,.0f} millones de años".replace(",", ".") if anos_n > 1e6 else f"{anos_n:,.0f} años".replace(",", ".")
+    ax.text(0.02, 0.42, f"Días con caída ≥ 5 %: {(r <= -5).sum()} reales\nfrente a {len(r) * 2 * _norm.cdf(-5, mu, sd):.0f} que predeciría la campana.\n\nUn día del {r.min():+.1f} % ocurriría, según la campana,\nuna vez cada {anos_txt}. Ocurrió.",
+            transform=ax.transAxes, va="top", fontsize=10, bbox=dict(boxstyle="round,pad=0.4", fc="white", ec="#e2ede8"))
+    ax.set_xlabel("Retorno diario (%)"); ax.set_ylabel("Días (escala log)"); ax.legend(frameon=False, loc="upper right", fontsize=9.5)
+    ax.set_title("Colas gordas: los días extremos ocurren mucho más de lo que dice la campana normal\nPor eso el tamaño de posición mira la volatilidad reciente y por eso no hay apalancamiento por defecto", fontsize=11.5, loc="left")
+    fig.tight_layout(); guardar(fig, "18_aed_colas.png")
+
+    # 19. retornos mensuales (mapa de calor) con el año a la derecha
+    me = res["mensual"]; Mz = np.array([[np.nan if (v is None or abs(v) < 1e-9) else v * 100 for v in fila] for fila in me["matriz"]])
+    fig, ax = plt.subplots(figsize=(13, 0.34 * len(me["anos"]) + 1.6))
+    vmax = np.nanmax(np.abs(Mz)); im = ax.imshow(Mz, cmap="RdYlGn", vmin=-vmax, vmax=vmax, aspect="auto")
+    for i in range(Mz.shape[0]):
+        for j in range(12):
+            if not np.isnan(Mz[i, j]): ax.text(j, i, f"{Mz[i,j]:+.1f}", ha="center", va="center", fontsize=7.5, color=TINTA if abs(Mz[i, j]) < vmax * 0.6 else "white")
+        f = me["filas"][i]; ax.text(12.1, i, f"{f['anual']*100:+.1f} %", va="center", fontsize=8.5, fontweight="bold", color=VERDE if f["anual"] >= 0 else ROJO)
+        ax.text(13.4, i, f"{f['pos']}↑ {f['neg']}↓", va="center", fontsize=8, color="#3a4b44")
+    ax.set_xticks(range(12)); ax.set_xticklabels(["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"])
+    ax.set_yticks(range(len(me["anos"]))); ax.set_yticklabels(me["anos"], fontsize=8.5); ax.set_xlim(-0.5, 14.2); ax.grid(False)
+    ax.text(12.1, -0.9, "año", fontsize=8.5, fontweight="bold"); ax.text(13.4, -0.9, "meses ↑↓", fontsize=8.5, fontweight="bold")
+    ax.set_title(f"Retorno mes a mes con el 100 % del capital · {me['meses_pos']} meses positivos, {me['meses_neg']} negativos, {me['meses_planos']} sin operar (en blanco)", fontsize=11, loc="left", pad=18)
+    fig.tight_layout(); guardar(fig, "19_meses.png")
+
+    # 20. drawdowns por profundidad (bins)
+    bins = res["drawdowns"]["bins"]
+    fig, ax = plt.subplots(figsize=(11, 4.6))
+    cols = ["#b9efd1", "#5eeba4", "#f0a860", "#f4805e", ROJO]
+    ax.bar(range(len(bins)), [b["n"] for b in bins], color=cols, width=0.65)
+    for i, b in enumerate(bins):
+        ax.text(i, b["n"] + 1, f"{b['n']} caídas · {b['pct']*100:.0f} %\nmedia {b['dias_medio']:.0f} días · máx {b['dias_max']} días", ha="center", fontsize=9, color="#3a4b44")
+    ax.set_xticks(range(len(bins))); ax.set_xticklabels([b["bin"] for b in bins]); ax.set_xlabel("Profundidad de la caída desde el máximo"); ax.set_ylabel("Número de caídas")
+    ax.set_ylim(0, max(b["n"] for b in bins) * 1.3)
+    ax.set_title(f"Las {res['drawdowns']['n']} caídas desde máximos, agrupadas por profundidad, con cuánto tardaron en recuperarse (100 % capital)", fontsize=11, loc="left")
+    fig.tight_layout(); guardar(fig, "20_dd_bins.png")
 
     # 11. robustez 4D: seis mapas con la misma escala
     r4 = res["robustez_4d"]
@@ -594,9 +717,37 @@ def graficos(df, tr_all, eq_cap, eq_atr, sp_date, res, raw):
             if sn == "Dos velas verdes" and cn == "5 bps":
                 a, b = r4["rsi"].index(RSI_THR), r4["sma"].index(SMA_LEN)
                 ax.add_patch(plt.Rectangle((b - 0.5, a - 0.5), 1, 1, fill=False, ec=TINTA, lw=2.5))
-    fig.suptitle(f"Robustez en cuatro dimensiones — Profit Factor en construcción para {r4['n_combos']} combinaciones", fontweight="bold", x=0.01, ha="left")
+    fig.suptitle(f"Los seis mapas: Profit Factor en construcción para {r4['n_combos']} combinaciones (tres salidas × dos costes)", fontweight="bold", x=0.01, ha="left")
     fig.colorbar(im, ax=axs, label="Profit Factor (IS)", shrink=0.7, pad=0.02)
-    guardar(fig, "11_robustez_4d.png")
+    guardar(fig, "11_robustez_mapas.png")
+
+    # 11b. superficie 3D con cuarta dimensión en color (estilo MultiCharts) + barras con línea
+    todos = r4["_todos"]; base = [x for x in todos if x["salida"] == "Dos velas verdes" and x["coste"] == "5 bps"]
+    caro = {(x["rsi"], x["sma"]): x["pf"] for x in todos if x["salida"] == "Dos velas verdes" and x["coste"] == "10 bps"}
+    RS, SM = r4["rsi"], r4["sma"]; Z = np.array([[next(x["pf"] for x in base if x["rsi"] == rt and x["sma"] == sl) for sl in SM] for rt in RS])
+    C = np.array([[next(-x["mdd"] for x in base if x["rsi"] == rt and x["sma"] == sl) for sl in SM] for rt in RS])
+    fig = plt.figure(figsize=(10, 7.5)); ax3 = fig.add_subplot(1, 1, 1, projection="3d")
+    Xg, Yg = np.meshgrid(range(len(SM)), range(len(RS))); norm = plt.Normalize(C.min(), C.max()); cmap = plt.get_cmap("YlOrRd")
+    surf = ax3.plot_surface(Xg, Yg, Z, facecolors=cmap(norm(C)), rstride=1, cstride=1, linewidth=0.4, edgecolor="#ffffff", alpha=0.95, shade=False)
+    ax3.set_xticks(range(len(SM))); ax3.set_xticklabels([str(s) for s in SM], fontsize=8); ax3.set_yticks(range(len(RS))); ax3.set_yticklabels([f"<{r}" for r in RS], fontsize=8)
+    ax3.set_xlabel("periodo SMA", fontsize=9, labelpad=6); ax3.set_ylabel("umbral RSI(2)", fontsize=9, labelpad=6); ax3.set_zlabel("Profit Factor (IS)", fontsize=9, labelpad=4)
+    ia, ib = RS.index(RSI_THR), SM.index(SMA_LEN); ax3.scatter([ib], [ia], [Z[ia, ib] + 0.05], color=TINTA, s=60, depthshade=False)
+    ax3.text(ib, ia, Z[ia, ib] + 0.35, "la que opera", fontsize=9, fontweight="bold", color=TINTA)
+    ax3.view_init(elev=30, azim=-125); ax3.set_box_aspect((1.25, 1, 0.75)); ax3.set_zlim(0, Z.max() * 1.05)
+    ax3.set_title("Superficie: altura = Profit Factor · color = drawdown máximo (versión fija para imprimir)", fontsize=10.5, loc="left")
+    m = plt.cm.ScalarMappable(cmap=cmap, norm=norm); m.set_array([]); cb = fig.colorbar(m, ax=ax3, shrink=0.55, pad=0.08); cb.set_label("drawdown máx. (IS), fracción", fontsize=8.5)
+    fig.tight_layout(); guardar(fig, "11_robustez_4d.png")
+
+    fig, ax4 = plt.subplots(figsize=(13, 5.6))
+    orden = sorted(base, key=lambda x: -x["pf"]); et = [f"{x['rsi']}/{x['sma']}" for x in orden]
+    cols = [TINTA if (x["rsi"] == RSI_THR and x["sma"] == SMA_LEN) else VERDE2 for x in orden]
+    ax4.bar(range(len(orden)), [x["pf"] for x in orden], color=cols, width=0.75)
+    ax4.plot(range(len(orden)), [caro[(x["rsi"], x["sma"])] for x in orden], color="#c97d1e", lw=2, marker="o", ms=3.5)
+    ax4.axhline(1.3, color=ROJO, ls="--", lw=1); ax4.text(len(orden) - 0.5, 1.33, "criterio 1,3", color=ROJO, ha="right", fontsize=9)
+    ax4.set_xticks(range(len(orden))); ax4.set_xticklabels(et, rotation=90, fontsize=7.5); ax4.set_xlabel("combinación umbral RSI / periodo SMA (ordenadas de mejor a peor)", fontsize=9)
+    ax4.set_ylabel("Profit Factor (IS)"); ax4.set_title("Las 30 combinaciones ordenadas de mejor a peor: barras con 5 bps por lado · línea con el doble de coste", fontsize=11.5, loc="left")
+    ax4.legend([plt.Rectangle((0, 0), 1, 1, color=VERDE2), plt.Line2D([], [], color="#c97d1e", lw=2, marker="o"), plt.Rectangle((0, 0), 1, 1, color=TINTA)], ["PF con 5 bps por lado", "PF con 10 bps por lado", "la que opera"], frameon=False, fontsize=9.5)
+    fig.tight_layout(); guardar(fig, "11b_robustez_barras.png")
 
     # 12. distribución de las combinaciones
     pfs = np.array([x["pf"] for x in r4["_todos"]])
@@ -624,6 +775,7 @@ def main():
     ap.add_argument("--csv", default=str(RAIZ / "data" / "QQQ_D1.csv"))
     ap.add_argument("--etiqueta", default="QQQ")
     ap.add_argument("--solo-metricas", action="store_true")
+    ap.add_argument("--fuente", default="Yahoo Finance (QQQ ajustado)")
     args = ap.parse_args()
     OUT.mkdir(exist_ok=True)
 
@@ -635,7 +787,7 @@ def main():
     eqi_cap, eqo_cap = equity_diaria(dfi, ti), equity_diaria(dfo, to)
     eqo_atr, eqo_atr2, eqo_x2 = equity_diaria(dfo, to, "atr"), equity_diaria(dfo, to, "atr2"), equity_diaria(dfo, to, "x2")
 
-    res = dict(meta=dict(activo=args.etiqueta, fuente=Path(args.csv).name, desde=str(df.index[0].date()),
+    res = dict(meta=dict(activo=args.etiqueta, fuente=args.fuente, fichero=Path(args.csv).name, desde=str(df.index[0].date()),
                          hasta=str(df.index[-1].date()), velas=int(len(df)), rsi=RSI_THR, sma=SMA_LEN,
                          slippage_bps_lado=SLIP * 1e4, is_desde=str(dfi.index[0].date()), is_hasta=str(dfi.index[-1].date()),
                          oos_desde=str(dfo.index[0].date()), oos_hasta=str(dfo.index[-1].date()),
@@ -670,15 +822,17 @@ def main():
     res["fase2"] = fase2_walkforward(df)
     res["fase3"] = fase3_grid(raw, dfi.index[-1])
     res["robustez_4d"] = robustez_4d(raw, dfi.index[-1])
-    res["fase4"] = fase4_montecarlo(ta)
+    res["fase4"] = fase4_montecarlo(ta, guardar_caminos=True)
     res["fase4_atr"] = {k: v for k, v in fase4_montecarlo(ta, sizing="atr").items() if not k.startswith("_")}
     res["fase5"] = fase5_stress(df, dfo, to)
     res["monkey"] = monkey_test(df, ta)
-    res["edge_decay"] = edge_decay(ta, dfi.index[-1])
+    res["edge_decay"] = edge_decay(ta, dfi.index[-1]); res["edge_decay"]["movil"] = pf_movil(ta, 40)
     res["drawdowns"] = episodios_dd(eq_cap)
+    res["mensual"] = mensual(eq_cap)
     res["drawdowns_atr"] = episodios_dd(eq_atr, top=3)
+    # Fase 4 se evalúa sobre el tamaño con el que opera el robot (1 % de riesgo por ATR); el 100 % del capital se muestra como referencia
     res["veredicto"] = dict(fase1=res["fase1"]["pasa"], fase2=res["fase2"]["pasa"], fase3=res["fase3"]["pasa"],
-                            fase4=res["fase4"]["pasa"], fase5=res["fase5"]["pasa"])
+                            fase4=res["fase4_atr"]["pasa"], fase5=res["fase5"]["pasa"])
 
     if not args.solo_metricas:
         graficos(df, ta, eq_cap, eq_atr, sp_date, res, raw)
